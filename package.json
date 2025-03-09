@@ -1,0 +1,201 @@
+{
+  "name": "database-manager",
+  "displayName": "Database Manager",
+  "description": "A database management extension for VS Code",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.86.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "database-manager.connectDatabase",
+        "title": "连接数据库",
+        "icon": "$(database)"
+      },
+      {
+        "command": "database-manager.refreshConnection",
+        "title": "刷新连接",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "database-manager.disconnectDatabase",
+        "title": "断开连接",
+        "icon": "$(close)"
+      },
+      {
+        "command": "database-manager.testConnection",
+        "title": "测试连接",
+        "icon": "$(check)"
+      },
+      {
+        "command": "database-manager.editConnection",
+        "title": "编辑连接",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "database-manager.removeConnection",
+        "title": "删除连接",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "database-manager.executeQuery",
+        "title": "执行SQL查询",
+        "icon": "$(play)"
+      },
+      {
+        "command": "database-manager.previewTable",
+        "title": "预览表数据",
+        "icon": "$(table)"
+      },
+      {
+        "command": "database-manager.exportData",
+        "title": "导出数据",
+        "icon": "$(export)"
+      },
+      {
+        "command": "database-manager.importData",
+        "title": "导入数据",
+        "icon": "$(import)"
+      },
+      {
+        "command": "database-manager.truncateTable",
+        "title": "清空表",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "database-manager.createDatabase",
+        "title": "创建数据库",
+        "icon": "$(add)"
+      },
+      {
+        "command": "database-manager.createTable",
+        "title": "创建表",
+        "icon": "$(add)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "database-explorer",
+          "title": "数据库管理器",
+          "icon": "$(database)"
+        }
+      ]
+    },
+    "views": {
+      "database-explorer": [
+        {
+          "id": "databaseExplorer",
+          "name": "数据库连接"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "database-manager.connectDatabase",
+          "when": "view == databaseExplorer",
+          "group": "navigation"
+        },
+        {
+          "command": "database-manager.refreshConnection",
+          "when": "view == databaseExplorer",
+          "group": "navigation"
+        },
+        {
+          "command": "database-manager.executeQuery",
+          "when": "view == databaseExplorer",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "database-manager.disconnectDatabase",
+          "when": "view == databaseExplorer && viewItem == connection",
+          "group": "9_disconnect"
+        },
+        {
+          "command": "database-manager.testConnection",
+          "when": "view == databaseExplorer && viewItem == connection",
+          "group": "1_connection"
+        },
+        {
+          "command": "database-manager.editConnection",
+          "when": "view == databaseExplorer && viewItem == connection",
+          "group": "1_connection"
+        },
+        {
+          "command": "database-manager.removeConnection",
+          "when": "view == databaseExplorer && viewItem == connection",
+          "group": "9_disconnect"
+        },
+        {
+          "command": "database-manager.createDatabase",
+          "when": "view == databaseExplorer && viewItem == connection",
+          "group": "2_create"
+        },
+        {
+          "command": "database-manager.createTable",
+          "when": "view == databaseExplorer && viewItem == database",
+          "group": "2_create"
+        },
+        {
+          "command": "database-manager.previewTable",
+          "when": "view == databaseExplorer && viewItem == table",
+          "group": "1_table"
+        },
+        {
+          "command": "database-manager.exportData",
+          "when": "view == databaseExplorer && viewItem == table",
+          "group": "2_data"
+        },
+        {
+          "command": "database-manager.importData",
+          "when": "view == databaseExplorer && viewItem == table",
+          "group": "2_data"
+        },
+        {
+          "command": "database-manager.truncateTable",
+          "when": "view == databaseExplorer && viewItem == table",
+          "group": "9_truncate"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "18.x",
+    "@types/vscode": "^1.86.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.1",
+    "@typescript-eslint/parser": "^6.19.1",
+    "@vscode/test-electron": "^2.3.9",
+    "esbuild": "^0.20.0",
+    "eslint": "^8.56.0",
+    "mocha": "^10.2.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "mysql2": "^3.9.2",
+    "pg": "^8.11.3",
+    "sqlite3": "^5.1.7",
+    "xlsx": "^0.18.5"
+  },
+  "files": [
+    "out/**/*",
+    "src/templates/**/*"
+  ]
+}
