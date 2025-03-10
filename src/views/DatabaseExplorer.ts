@@ -22,13 +22,27 @@ async function isSQLiteFile(filePath: string): Promise<boolean> {
 }
 
 // 定义树节点类型
-type TreeNode = ConnectionNode | TableNode | ColumnNode;
+type TreeNode = ConnectionNode | DatabaseNode | TableNode | ColumnNode;
+
+// 数据库节点
+class DatabaseNode extends vscode.TreeItem {
+    constructor(
+        public readonly connectionId: string,
+        public readonly databaseName: string
+    ) {
+        super(databaseName, vscode.TreeItemCollapsibleState.Collapsed);
+        this.contextValue = 'database';
+        this.iconPath = new vscode.ThemeIcon('database');
+        this.tooltip = `数据库: ${databaseName}`;
+    }
+}
 
 // 表节点
 class TableNode extends vscode.TreeItem {
     constructor(
         public readonly connectionId: string,
-        public readonly tableName: string
+        public readonly tableName: string,
+        public readonly databaseName?: string
     ) {
         super(tableName, vscode.TreeItemCollapsibleState.Collapsed);
         this.contextValue = 'table';
@@ -40,7 +54,8 @@ class TableNode extends vscode.TreeItem {
             arguments: [{
                 table: {
                     connectionId: connectionId,
-                    name: tableName
+                    name: tableName,
+                    database: databaseName
                 }
             }]
         };
@@ -53,7 +68,8 @@ class ColumnNode extends vscode.TreeItem {
         public readonly connectionId: string,
         public readonly tableName: string,
         public readonly columnName: string,
-        public readonly dataType: string
+        public readonly dataType: string,
+        public readonly databaseName?: string
     ) {
         super(columnName, vscode.TreeItemCollapsibleState.None);
         this.contextValue = 'column';
@@ -101,19 +117,54 @@ export class DatabaseExplorerProvider implements vscode.TreeDataProvider<TreeNod
                     new ConnectionNode(id, vscode.TreeItemCollapsibleState.Collapsed)
                 );
             } else if (element instanceof ConnectionNode && element.contextValue === 'connection') {
-                // 连接节点，尝试连接并显示所有表
+                // 连接节点，尝试连接并显示所有表或数据库
                 try {
                     await this.databaseManager.ensureConnected(element.connectionId);
-                    const tables = await this.databaseManager.getTables(element.connectionId);
-                    return tables.map(table => new TableNode(element.connectionId, table));
+                    const config = this.databaseManager.getConnectionConfig(element.connectionId);
+                    
+                    if (config && config.type === 'mongodb') {
+                        // MongoDB 连接显示所有数据库
+                        const databases = await this.databaseManager.getDatabases(element.connectionId);
+                        return databases.map(db => new DatabaseNode(element.connectionId, db));
+                    } else {
+                        // 其他数据库类型直接显示表
+                        const tables = await this.databaseManager.getTables(element.connectionId);
+                        return tables.map(table => new TableNode(element.connectionId, table));
+                    }
                 } catch (error) {
                     vscode.window.showErrorMessage(`连接失败: ${(error as Error).message}`);
                     return [];
                 }
+            } else if (element instanceof DatabaseNode) {
+                // 数据库节点，显示该数据库中的所有表
+                try {
+                    const tables = await this.databaseManager.getTablesInDatabase(element.connectionId, element.databaseName);
+                    return tables.map(table => new TableNode(element.connectionId, table, element.databaseName));
+                } catch (error) {
+                    vscode.window.showErrorMessage(`获取表失败: ${(error as Error).message}`);
+                    return [];
+                }
             } else if (element instanceof TableNode) {
                 // 表节点，显示所有列
-                const columns = await this.databaseManager.getColumns(element.connectionId, element.tableName);
-                return columns.map(col => new ColumnNode(element.connectionId, element.tableName, col.name, col.type));
+                try {
+                    const columns = await this.databaseManager.getColumns(
+                        element.connectionId, 
+                        element.tableName, 
+                        element.databaseName
+                    );
+                    return columns.map(col => 
+                        new ColumnNode(
+                            element.connectionId, 
+                            element.tableName, 
+                            col.name, 
+                            col.type, 
+                            element.databaseName
+                        )
+                    );
+            } catch (error) {
+                    vscode.window.showErrorMessage(`获取列失败: ${(error as Error).message}`);
+                    return [];
+            }
             }
             return [];
         } catch (error) {
@@ -137,20 +188,20 @@ class ConnectionNode extends vscode.TreeItem {
         } else {
             const config = DatabaseManager.getInstance().getConnectionConfig(connectionId);
             if (config) {
-                this.contextValue = 'connection';
+        this.contextValue = 'connection';
                 // 根据连接状态设置不同的图标
                 const isConnected = DatabaseManager.getInstance().isConnected(connectionId);
                 switch (config.type) {
                     case 'mysql':
                         this.iconPath = new vscode.ThemeIcon('database', new vscode.ThemeColor(isConnected ? 'charts.blue' : 'disabledForeground'));
                         break;
-                    case 'postgresql':
-                        this.iconPath = new vscode.ThemeIcon('database', new vscode.ThemeColor(isConnected ? 'charts.purple' : 'disabledForeground'));
-                        break;
                     case 'sqlite':
                         this.iconPath = new vscode.ThemeIcon('database', new vscode.ThemeColor(isConnected ? 'charts.green' : 'disabledForeground'));
                         break;
-                    case 'mssql':
+                    case 'mongodb':
+                        this.iconPath = new vscode.ThemeIcon('database', new vscode.ThemeColor(isConnected ? 'charts.purple' : 'disabledForeground'));
+                        break;
+                    case 'oracle':
                         this.iconPath = new vscode.ThemeIcon('database', new vscode.ThemeColor(isConnected ? 'charts.red' : 'disabledForeground'));
                         break;
                 }
@@ -159,8 +210,12 @@ class ConnectionNode extends vscode.TreeItem {
                 let connectionPath = '';
                 if (config.type === 'sqlite') {
                     connectionPath = `${config.filename}`;
+                } else if (config.type === 'mongodb') {
+                    connectionPath = `${config.host || 'localhost'}:${config.port || '27017'}`;
+                } else if (config.type === 'oracle') {
+                    connectionPath = config.connectionString || `${config.host || 'localhost'}:${config.port || '1521'}`;
                 } else {
-                    connectionPath = `${config.host || 'localhost'}:${config.port || ''}/${config.database || ''}`;
+                    connectionPath = `${config.host || 'localhost'}:${config.port || '3306'}/${config.database || ''}`;
                 }
                 
                 this.tooltip = `数据库连接: ${config.alias}\n类型: ${config.type}\n连接地址: ${connectionPath}`;
@@ -173,7 +228,7 @@ class ConnectionNode extends vscode.TreeItem {
 
 export async function connectToDatabase() {
     const dbType = await vscode.window.showQuickPick(
-        ['mysql', 'postgresql', 'sqlite', 'mssql'],
+        ['mysql', 'sqlite', 'mongodb', 'oracle'],
         { placeHolder: '选择数据库类型' }
     );
 
@@ -215,9 +270,114 @@ export async function connectToDatabase() {
             alias,
             filename: filePath[0].fsPath
         };
-    } else {
+    } else if (dbType === 'mongodb') {
         const host = await vscode.window.showInputBox({ prompt: '输入主机地址', value: 'localhost' });
-        const port = await vscode.window.showInputBox({ prompt: '输入端口号' });
+        const port = await vscode.window.showInputBox({ prompt: '输入端口号', value: '27017' });
+        const username = await vscode.window.showInputBox({ prompt: '输入用户名（可选）' });
+        const password = await vscode.window.showInputBox({ prompt: '输入密码（可选）', password: true });
+        
+        // 对于 MongoDB，数据库名称是可选的
+        const specifyDatabase = await vscode.window.showQuickPick(
+            ['是', '否'],
+            { placeHolder: '是否指定默认数据库？（可选，连接后可以浏览所有数据库）' }
+        );
+        
+        let database: string | undefined;
+        if (specifyDatabase === '是') {
+            database = await vscode.window.showInputBox({ prompt: '输入数据库名（可选）' });
+        }
+
+        if (!host || !port) {
+            return;
+        }
+
+        config = {
+            type: 'mongodb',
+            alias,
+            host,
+            port: parseInt(port),
+            username: username || undefined,
+            password: password || undefined,
+            database: database || undefined
+        };
+    } else if (dbType === 'oracle') {
+        const useConnectionString = await vscode.window.showQuickPick(
+            ['是', '否'],
+            { placeHolder: '是否使用连接字符串？' }
+        );
+
+        if (!useConnectionString) {
+            return;
+        }
+
+        if (useConnectionString === '是') {
+            const connectionString = await vscode.window.showInputBox({ 
+                prompt: '输入连接字符串',
+                placeHolder: '例如: (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))'
+            });
+            const username = await vscode.window.showInputBox({ prompt: '输入用户名' });
+            const password = await vscode.window.showInputBox({ prompt: '输入密码', password: true });
+
+            if (!connectionString || !username || !password) {
+                return;
+            }
+
+            config = {
+                type: 'oracle',
+                alias,
+                connectionString,
+                username,
+                password
+            };
+        } else {
+            const host = await vscode.window.showInputBox({ prompt: '输入主机地址', value: 'localhost' });
+            const port = await vscode.window.showInputBox({ prompt: '输入端口号', value: '1521' });
+            const username = await vscode.window.showInputBox({ prompt: '输入用户名' });
+            const password = await vscode.window.showInputBox({ prompt: '输入密码', password: true });
+            
+            const connectType = await vscode.window.showQuickPick(
+                ['SID', 'Service Name'],
+                { placeHolder: '选择连接类型' }
+            );
+            
+            if (!connectType) {
+                return;
+            }
+            
+            let sid: string | undefined;
+            let serviceName: string | undefined;
+            
+            if (connectType === 'SID') {
+                sid = await vscode.window.showInputBox({ prompt: '输入SID', value: 'ORCL' });
+                if (!sid) {
+                    return;
+                }
+            } else {
+                serviceName = await vscode.window.showInputBox({ prompt: '输入Service Name' });
+                if (!serviceName) {
+                    return;
+                }
+            }
+
+            if (!host || !port || !username || !password) {
+                return;
+            }
+
+            config = {
+                type: 'oracle',
+                alias,
+                host,
+                port: parseInt(port),
+                username,
+                password,
+                sid,
+                serviceName
+            };
+        }
+    } else {
+        // MySQL
+        const host = await vscode.window.showInputBox({ prompt: '输入主机地址', value: 'localhost' });
+        const port = await vscode.window.showInputBox({ prompt: '输入端口号', value: '3306' });
         const username = await vscode.window.showInputBox({ prompt: '输入用户名' });
         const password = await vscode.window.showInputBox({ prompt: '输入密码', password: true });
         const database = await vscode.window.showInputBox({ prompt: '输入数据库名' });
@@ -227,7 +387,7 @@ export async function connectToDatabase() {
         }
 
         config = {
-            type: dbType as 'mysql' | 'postgresql' | 'mssql',
+            type: 'mysql',
             alias,
             host,
             port: parseInt(port),

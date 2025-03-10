@@ -1,9 +1,9 @@
 import { Connection } from 'mysql2/promise';
-import { Client } from 'pg';
 import { Database } from 'sqlite3';
-import { ConnectionPool } from 'mssql';
+import { MongoClient } from 'mongodb';
+import * as oracledb from 'oracledb';
 
-export type DatabaseType = 'mysql' | 'postgresql' | 'sqlite' | 'mssql';
+export type DatabaseType = 'mysql' | 'sqlite' | 'mongodb' | 'oracle';
 
 export interface DatabaseConfig {
     type: DatabaseType;
@@ -13,11 +13,14 @@ export interface DatabaseConfig {
     password?: string;
     database?: string;
     filename?: string; // 用于SQLite
+    connectionString?: string; // 用于Oracle
+    sid?: string; // 用于Oracle
+    serviceName?: string; // 用于Oracle
 }
 
 export interface DatabaseConnection {
     type: DatabaseType;
-    connection: Connection | Client | Database | ConnectionPool;
+    connection: Connection | Database | MongoClient | oracledb.Connection;
 }
 
 export interface QueryResult {

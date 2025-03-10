@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { DatabaseManager } from './database/DatabaseManager';
 import { DatabaseExplorerProvider, connectToDatabase } from './views/DatabaseExplorer';
-import { ConfigManager } from './database/ConfigManager';
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('数据库管理器插件已激活');
@@ -45,6 +44,165 @@ export function activate(context: vscode.ExtensionContext) {
             databaseExplorerProvider.refresh();
         }),
 
+        vscode.commands.registerCommand('database-manager.refreshConnection', () => {
+            databaseExplorerProvider.refresh();
+        }),
+
+        vscode.commands.registerCommand('database-manager.executeQuery', async () => {
+            // 打开输入框让用户输入SQL查询
+            const query = await vscode.window.showInputBox({
+                prompt: '输入SQL查询语句',
+                placeHolder: 'SELECT * FROM table_name'
+            });
+
+            if (!query) {
+                return;
+            }
+
+            // 获取当前选中的连接
+            const connections = databaseManager.getConnections();
+            if (connections.length === 0) {
+                vscode.window.showErrorMessage('没有可用的数据库连接');
+                return;
+            }
+
+            // 如果有多个连接，让用户选择
+            let connectionId: string;
+            if (connections.length === 1) {
+                connectionId = connections[0];
+            } else {
+                const configs = databaseManager.getAllConfigs();
+                const items = Array.from(configs.entries()).map(([id, config]) => ({
+                    label: config.alias,
+                    description: config.type,
+                    connectionId: id
+                }));
+
+                const selected = await vscode.window.showQuickPick(items, {
+                    placeHolder: '选择要执行查询的数据库连接'
+                });
+
+                if (!selected) {
+                    return;
+                }
+
+                connectionId = selected.connectionId;
+            }
+
+            try {
+                // 确保连接已建立
+                await databaseManager.ensureConnected(connectionId);
+
+                // 执行查询
+                const result = await databaseManager.executeQuery(connectionId, query);
+
+                // 创建和显示 WebView 展示结果
+                const panel = vscode.window.createWebviewPanel(
+                    'queryResult',
+                    '查询结果',
+                    vscode.ViewColumn.One,
+                    {
+                        enableScripts: true
+                    }
+                );
+
+                // 生成表格HTML
+                let tableHtml = '';
+                if (Array.isArray(result) && result.length > 0) {
+                    // 生成表头
+                    const headers = Object.keys(result[0]);
+                    const headerRow = headers.map(h => `<th>${h}</th>`).join('');
+                    
+                    // 生成表体
+                    const rows = result.map(row => {
+                        const cells = headers.map(h => `<td>${row[h] === null ? 'NULL' : row[h]}</td>`).join('');
+                        return `<tr>${cells}</tr>`;
+                    }).join('');
+                    
+                    tableHtml = `
+                    <table>
+                        <thead>
+                            <tr>${headerRow}</tr>
+                        </thead>
+                        <tbody>
+                            ${rows}
+                        </tbody>
+                    </table>
+                    `;
+                } else {
+                    tableHtml = '<p>查询执行成功，但没有返回数据。</p>';
+                }
+
+                // 设置WebView内容
+                panel.webview.html = `
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>查询结果</title>
+                    <style>
+                        body {
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+                            padding: 10px;
+                            background-color: #1e1e1e;
+                            color: #cccccc;
+                        }
+                        table {
+                            border-collapse: collapse;
+                            width: 100%;
+                        }
+                        th, td {
+                            text-align: left;
+                            padding: 8px;
+                            border: 1px solid #3c3c3c;
+                        }
+                        th {
+                            background-color: #252526;
+                        }
+                        tr:nth-child(even) {
+                            background-color: #252526;
+                        }
+                        tr:hover {
+                            background-color: #2a2d2e;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <h2>查询结果</h2>
+                    <p>执行的SQL: <code>${query}</code></p>
+                    <p>返回记录数: ${Array.isArray(result) ? result.length : 0}</p>
+                    ${tableHtml}
+                </body>
+                </html>
+                `;
+            } catch (error) {
+                vscode.window.showErrorMessage(`执行查询失败: ${(error as Error).message}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('database-manager.removeConnection', async (node) => {
+            try {
+                if (!node || !node.connectionId) {
+                return;
+                }
+                const confirm = await vscode.window.showWarningMessage(
+                    `确定要删除连接 ${node.label} 吗？`, 
+                    { modal: true }, 
+                    '确定'
+                );
+                if (confirm === '确定') {
+                    await DatabaseManager.getInstance().removeConfig(node.connectionId);
+                    databaseExplorerProvider.refresh();
+                    vscode.window.showInformationMessage('连接已删除');
+                }
+            } catch (error: unknown) {
+                const errorMessage = error instanceof Error ? error.message : '未知错误';
+                console.error('删除连接失败:', error);
+                vscode.window.showErrorMessage(`删除失败: ${errorMessage}`);
+            }
+        }),
+
         vscode.commands.registerCommand('database-manager.previewTable', async (node) => {
             try {
                 if (!node || !node.table || !node.table.connectionId || !node.table.name) {
@@ -53,6 +211,7 @@ export function activate(context: vscode.ExtensionContext) {
 
                 const connectionId = node.table.connectionId;
                 const tableName = node.table.name;
+                const databaseName = node.table.database; // 获取数据库名称
 
                 // 检查数据库配置
                 const config = databaseManager.getConnectionConfig(connectionId);
@@ -66,7 +225,7 @@ export function activate(context: vscode.ExtensionContext) {
                 // 创建和显示 WebView
                 const panel = vscode.window.createWebviewPanel(
                     'tablePreview',
-                    `${config.alias} - ${tableName}`,
+                    `${config.alias} - ${databaseName ? databaseName + '.' : ''}${tableName}`,
                     vscode.ViewColumn.One,
                     {
                         enableScripts: true,
@@ -75,40 +234,82 @@ export function activate(context: vscode.ExtensionContext) {
                 );
 
                 // 执行查询获取表数据
-                let result = await databaseManager.executeQuery(connectionId, `SELECT * FROM ${tableName} LIMIT 1000`) as Record<string, any>[];
+                let result;
+                if (config.type === 'mongodb') {
+                    try {
+                        console.log('获取MongoDB表数据...');
+                        
+                        // 获取 MongoDB 连接
+                        const connection = await databaseManager.getMongoConnection(connectionId, databaseName);
+                        if (!connection) {
+                            throw new Error('无法获取 MongoDB 连接');
+                        }
+                        
+                        // 执行查询
+                        console.log('执行MongoDB查询:', { collection: tableName });
+                        const cursor = connection.collection(tableName).find({});
+                        result = await cursor.toArray();
+                        console.log('MongoDB查询结果:', result);
+                    } catch (error) {
+                        console.error('获取MongoDB表数据失败:', error);
+                        vscode.window.showErrorMessage(`获取MongoDB表数据失败: ${(error as Error).message}`);
+                        throw error;
+                    }
+                } else {
+                    // 其他数据库使用 SQL 查询
+                    result = await databaseManager.executeQuery(connectionId, `SELECT * FROM ${tableName} LIMIT 1000`) as Record<string, any>[];
+                }
 
                 // 获取表的主键信息
                 let primaryKeys: string[] = [];
                 try {
-                    const pkQuery = config.type === 'sqlite' ?
-                        `PRAGMA table_info(${tableName})` :
-                        `SELECT k.column_name
-                        FROM information_schema.table_constraints t
-                        JOIN information_schema.key_column_usage k
-                        USING(constraint_name,table_schema,table_name)
-                        WHERE t.constraint_type='PRIMARY KEY'
-                            AND t.table_name='${tableName}'`;
-
-                    const pkResult = await databaseManager.executeQuery(connectionId, pkQuery);
-                    primaryKeys = config.type === 'sqlite' ?
-                        pkResult.filter((row: any) => row.pk === 1).map((row: any) => row.name) :
-                        pkResult.map((row: any) => row.column_name);
+                    if (config.type === 'mongodb') {
+                        // MongoDB 没有传统意义上的主键，但 _id 字段通常作为唯一标识符
+                        primaryKeys = ['_id'];
+                    } else if (config.type === 'sqlite') {
+                        const pkQuery = `PRAGMA table_info(${tableName})`;
+                        const pkResult = await databaseManager.executeQuery(connectionId, pkQuery);
+                        primaryKeys = pkResult.filter((row: any) => row.pk === 1).map((row: any) => row.name);
+                    } else if (config.type === 'oracle') {
+                        // Oracle 查询主键
+                        const pkQuery = `
+                            SELECT cols.column_name
+                            FROM all_constraints cons, all_cons_columns cols
+                            WHERE cols.table_name = '${tableName.toUpperCase()}'
+                            AND cons.constraint_type = 'P'
+                            AND cons.constraint_name = cols.constraint_name
+                            AND cons.owner = cols.owner
+                            ORDER BY cols.position`;
+                        const pkResult = await databaseManager.executeQuery(connectionId, pkQuery);
+                        primaryKeys = pkResult.map((row: any) => row.COLUMN_NAME);
+                    } else {
+                        // MySQL 查询主键
+                        const pkQuery = `
+                            SELECT k.column_name
+                            FROM information_schema.table_constraints t
+                            JOIN information_schema.key_column_usage k
+                            USING(constraint_name,table_schema,table_name)
+                            WHERE t.constraint_type='PRIMARY KEY'
+                                AND t.table_name='${tableName}'`;
+                        const pkResult = await databaseManager.executeQuery(connectionId, pkQuery);
+                        primaryKeys = pkResult.map((row: any) => row.column_name);
+                    }
                 } catch (error) {
                     console.warn('获取主键信息失败:', error);
                 }
 
                 // 如果没有主键，添加行号作为标识
-                if (primaryKeys.length === 0) {
+                if (primaryKeys.length === 0 && config.type !== 'mongodb') {
                     if (config.type === 'sqlite') {
                         result = await databaseManager.executeQuery(connectionId, `SELECT rowid as __rowid, * FROM ${tableName} LIMIT 1000`);
+                    } else if (config.type === 'oracle') {
+                        // Oracle 使用 ROWNUM
+                        const rowNumberQuery = `SELECT ROWNUM as __rowid, t.* FROM ${tableName} t WHERE ROWNUM <= 1000`;
+                        result = await databaseManager.executeQuery(connectionId, rowNumberQuery);
                     } else {
-                        // 对于其他数据库，使用 ROW_NUMBER() 函数
-                        const rowNumberQuery = config.type === 'mysql' ?
-                            `SELECT (@row_number:=@row_number + 1) AS __rowid, t.* 
+                        // MySQL 使用变量
+                        const rowNumberQuery = `SELECT (@row_number:=@row_number + 1) AS __rowid, t.* 
                              FROM ${tableName} t, (SELECT @row_number:=0) r 
-                             LIMIT 1000` :
-                            `SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) as __rowid, * 
-                             FROM ${tableName} 
                              LIMIT 1000`;
                         result = await databaseManager.executeQuery(connectionId, rowNumberQuery);
                     }
@@ -117,13 +318,43 @@ export function activate(context: vscode.ExtensionContext) {
                 // 获取表的结构信息
                 let columnInfo = [];
                 try {
-                    const columnQuery = config.type === 'sqlite' ?
-                        `PRAGMA table_info(${tableName})` :
-                        `SELECT column_name, is_nullable, column_key
+                    if (config.type === 'mongodb') {
+                        // MongoDB 没有固定的表结构，从第一条记录推断
+                        if (result.length > 0) {
+                            columnInfo = Object.keys(result[0]).map(key => ({
+                                column_name: key,
+                                is_nullable: 'YES', // MongoDB 字段默认可为空
+                                column_key: key === '_id' ? 'PRI' : ''
+                            }));
+                        }
+                    } else if (config.type === 'sqlite') {
+                        const columnQuery = `PRAGMA table_info(${tableName})`;
+                        columnInfo = await databaseManager.executeQuery(connectionId, columnQuery);
+                    } else if (config.type === 'oracle') {
+                        const columnQuery = `
+                            SELECT column_name, 
+                                   CASE WHEN nullable = 'N' THEN 'NO' ELSE 'YES' END as is_nullable,
+                                   CASE WHEN constraint_type = 'P' THEN 'PRI' ELSE '' END as column_key
+                            FROM (
+                                SELECT c.column_name, c.nullable, pk.constraint_type
+                                FROM user_tab_columns c
+                                LEFT JOIN (
+                                    SELECT cols.column_name, cons.constraint_type
+                                    FROM user_constraints cons
+                                    JOIN user_cons_columns cols ON cons.constraint_name = cols.constraint_name
+                                    WHERE cons.table_name = '${tableName.toUpperCase()}'
+                                    AND cons.constraint_type = 'P'
+                                ) pk ON c.column_name = pk.column_name
+                                WHERE c.table_name = '${tableName.toUpperCase()}'
+                            )`;
+                        columnInfo = await databaseManager.executeQuery(connectionId, columnQuery);
+                    } else {
+                        // MySQL
+                        const columnQuery = `SELECT column_name, is_nullable, column_key
                          FROM information_schema.columns 
                          WHERE table_name = '${tableName}'`;
-
-                    columnInfo = await databaseManager.executeQuery(connectionId, columnQuery);
+                        columnInfo = await databaseManager.executeQuery(connectionId, columnQuery);
+                    }
                 } catch (error) {
                     console.warn('获取表结构信息失败:', error);
                 }
@@ -138,17 +369,26 @@ export function activate(context: vscode.ExtensionContext) {
                     column_key?: string;
                 }
 
-                const columnsMetadata = config.type === 'sqlite' ?
-                    columnInfo.map((col: ColumnInfo) => ({
+                let columnsMetadata;
+                if (config.type === 'sqlite') {
+                    columnsMetadata = columnInfo.map((col: ColumnInfo) => ({
                         name: col.name,
                         notNull: col.notnull === 1,
                         isPrimaryKey: col.pk === 1
-                    })) :
-                    columnInfo.map((col: ColumnInfo) => ({
+                    }));
+                } else if (config.type === 'mongodb' || config.type === 'oracle') {
+                    columnsMetadata = columnInfo.map((col: ColumnInfo) => ({
+                        name: col.column_name,
+                        notNull: col.is_nullable === 'NO',
+                        isPrimaryKey: col.column_key === 'PRI' || primaryKeys.includes(col.column_name || '')
+                    }));
+                } else {
+                    columnsMetadata = columnInfo.map((col: ColumnInfo) => ({
                         name: col.column_name,
                         notNull: col.is_nullable === 'NO',
                         isPrimaryKey: col.column_key === 'PRI'
                     }));
+                }
 
                 // 生成表头和表体
                 const headers = Object.keys(result[0] || {})
@@ -174,729 +414,791 @@ export function activate(context: vscode.ExtensionContext) {
                             ).join('') +
                         '<td>' +
                         '<div class="row-actions">' +
-                        '<button onclick="deleteRow(' + rowIndex + ')" class="delete" title="删除此行">删除</button>' +
+                        '<button class="delete" title="删除此行" data-row-index="' + rowIndex + '">删除</button>' +
                         '</div>' +
                         '</td>' +
                         '</tr>';
                 }).join('');
 
-                // 生成HTML内容
-                const htmlContent = `<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        body { 
-            padding: 10px; 
-            font-family: Arial, sans-serif;
-            background-color: #1e1e1e;
-            color: #cccccc;
-        }
-        .toolbar {
-            margin-bottom: 10px;
-            padding: 10px;
-            background: #252526;
-            border-radius: 4px;
-            position: sticky;
-            top: 0;
-            z-index: 1000;
-        }
-        .toolbar button {
-            padding: 5px 10px;
-            margin-right: 5px;
-            cursor: pointer;
-            background-color: #2d2d2d;
-            border: 1px solid #3c3c3c;
-            color: #cccccc;
-            border-radius: 2px;
-            position: relative;
-        }
-        .toolbar button:hover {
-            background-color: #37373d;
-        }
-        .toolbar button[title]:hover::after {
-            content: attr(title);
-            position: absolute;
-            bottom: 100%;
-            left: 50%;
-            transform: translateX(-50%);
-            padding: 4px 8px;
-            background-color: #252526;
-            border: 1px solid #3c3c3c;
-            border-radius: 2px;
-            white-space: nowrap;
-            z-index: 1000;
-        }
-        .table-container {
-            overflow: auto;
-            max-height: calc(100vh - 100px);
-            position: relative;
-            padding-bottom: 20px;
-        }
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            margin-top: 10px;
-            margin-bottom: 20px;
-            background-color: #1e1e1e;
-        }
-        th, td {
-            border: 1px solid #3c3c3c;
-            padding: 8px;
-            text-align: left;
-            min-width: 100px;
-            max-width: 300px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        th {
-            background-color: #252526;
-            position: sticky;
-            top: 0;
-            color: #cccccc;
-            z-index: 10;
-        }
-        tr {
-            background-color: #1e1e1e;
-            position: relative;
-        }
-        tr:nth-child(even) {
-            background-color: #252526;
-        }
-        .editable {
-            cursor: pointer;
-            user-select: none;
-        }
-        .editable:hover {
-            background-color: #37373d;
-        }
-        .editing input {
-            width: 100%;
-            padding: 5px;
-            box-sizing: border-box;
-            border: 1px solid #0e639c;
-            border-radius: 2px;
-            background-color: #3c3c3c;
-            color: #cccccc;
-        }
-        .modified {
-            background-color: #3c1e1e !important;
-        }
-        #status {
-            color: #89d185;
-            margin-left: 10px;
-        }
-        .toolbar button.danger {
-            background-color: #4d1f1f;
-            border-color: #6e2c2c;
-        }
-        .toolbar button.danger:hover {
-            background-color: #6e2c2c;
-        }
-        .toolbar button:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-        }
-        .row-actions {
-            visibility: hidden;
-            position: absolute;
-            right: 4px;
-            top: 50%;
-            transform: translateY(-50%);
-            z-index: 100;
-            transition: visibility 0s;
-        }
-        tr:hover .row-actions {
-            visibility: visible;
-        }
-        .row-actions button {
-            padding: 4px 8px;
-            margin: 0;
-            cursor: pointer;
-            background-color: transparent;
-            border: none;
-            color: #cccccc;
-            font-size: 14px;
-            line-height: 1;
-            transition: all 0.2s;
-            display: flex;
-            align-items: center;
-            opacity: 0.6;
-        }
-        .row-actions button.delete {
-            color: #ff6b6b;
-            opacity: 0.8;
-            background-color: rgba(255, 107, 107, 0.1);
-            padding: 6px;
-            border-radius: 4px;
-            margin-right: 4px;
-        }
-        .row-actions button.delete:hover {
-            opacity: 1;
-            transform: scale(1.1);
-            background-color: rgba(255, 107, 107, 0.2);
-        }
-        .row-actions button.delete::before {
-            content: '🗑';
-            font-size: 16px;
-        }
-        td:last-child {
-            position: relative;
-            width: 40px;
-            padding: 8px;
-            min-width: 40px;
-        }
-        .primary-key {
-            color: #ffd700 !important;
-            font-weight: bold;
-            position: relative;
-        }
-        th.primary-key {
-            padding-right: 24px;
-        }
-        th.primary-key::after {
-            content: '';
-            position: absolute;
-            right: 8px;
-            top: 50%;
-            transform: translateY(-50%);
-            width: 12px;
-            height: 12px;
-            background: #ffd700;
-            mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z'/%3E%3C/svg%3E");
-            mask-size: contain;
-            mask-repeat: no-repeat;
-            mask-position: center;
-            -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z'/%3E%3C/svg%3E");
-            -webkit-mask-size: contain;
-            -webkit-mask-repeat: no-repeat;
-            -webkit-mask-position: center;
-            opacity: 0.8;
-        }
-        th.primary-key:hover::after {
-            opacity: 1;
-            transform: translateY(-50%) scale(1.1);
-            transition: all 0.2s ease;
-        }
-    </style>
-</head>
-<body>
-    <div class="toolbar">
-        <input type="text" id="searchInput" placeholder="搜索数据..." style="padding: 5px 10px; margin-right: 10px; background-color: #3c3c3c; border: 1px solid #4c4c4c; color: #cccccc; border-radius: 2px; width: 200px;">
-        <button onclick="addNewRow()" title="添加新数据">添加数据</button>
-        <button onclick="saveChanges()" title="保存所有修改的数据到数据库">保存更改</button>
-        <button onclick="refreshData()" title="从数据库重新加载数据">刷新数据</button>
-        <span id="status"></span>
-    </div>
-    <div class="table-container">
-        <table id="dataTable">
-            <thead>
-                <tr>
-                    ${headers}
-                    <th style="width: 100px;">操作</th>
-                </tr>
-            </thead>
-            <tbody>
-                ${tableBody}
-            </tbody>
-        </table>
-    </div>
-    <script>
-        const vscode = acquireVsCodeApi();
-        let modifiedData = new Map();
-        let deletedRows = new Set();
-        let newRows = new Set();
-        let currentRowIndex = ${result.length};
-        let primaryKeys = ${JSON.stringify(primaryKeys)};
-        let columnsMetadata = ${JSON.stringify(columnsMetadata)};
-
-        function getRowIdentifier(row) {
-            const identifier = {};
-            if (primaryKeys.length > 0) {
-                // 如果有主键，使用主键值
-                primaryKeys.forEach(key => {
-                    const cell = row.querySelector('td[data-column="' + key + '"]');
-                    if (cell) {
-                        const value = cell.textContent.trim();
-                        // 主键不允许为 NULL
-                        identifier[key] = value === 'NULL' ? '' : value;
-                    }
-                });
-            } else {
-                // 如果没有主键，使用行ID和所有列的值组合
-                const rowId = row.dataset.rowId;
-                identifier['__rowid'] = rowId;
-                
-                // 同时也保存所有列的值作为额外的验证
-                Array.from(row.cells).forEach(cell => {
-                    if (!cell.classList.contains('editable')) return;
-                    const column = cell.dataset.column;
-                    const value = cell.textContent.trim();
-                    // 只有当值真的是 'NULL' 时才设为 null
-                    identifier[column] = value === 'NULL' ? null : value;
-                });
-            }
-            return identifier;
-        }
-
-        function deleteRow(rowIndex) {
-            const row = document.querySelector('tr[data-row-index="' + rowIndex + '"]');
-            if (!row) return;
-            
-            // 确认删除
-            if (!confirm('确定要删除这行数据吗？')) {
-                return;
-            }
-            
-            // 如果是新添加的行，直接从DOM中移除
-            if (newRows.has(parseInt(rowIndex))) {
-                row.remove();
-                newRows.delete(parseInt(rowIndex));
-                return;
-            }
-            
-            // 标记为已删除
-            row.style.display = 'none';
-            const rowId = row.dataset.rowId;
-            deletedRows.add(rowId || rowIndex.toString());
-            
-            // 清空搜索框，显示所有数据
-            const searchInput = document.getElementById('searchInput');
-            if (searchInput && searchInput.value) {
-                searchInput.value = '';
-                // 触发 input 事件以更新表格显示
-                searchInput.dispatchEvent(new Event('input'));
-            }
-        }
-
-        function addNewRow() {
-            const tbody = document.querySelector('tbody');
-            const headers = Array.from(document.querySelectorAll('thead th')).slice(0, -1);
-            const newRowIndex = currentRowIndex++;
-            
-            const tr = document.createElement('tr');
-            tr.dataset.rowIndex = newRowIndex.toString();
-            tr.innerHTML = headers.map(th => {
-                const columnName = th.textContent.replace(' 🔑', ''); // 移除可能存在的主键图标
-                const isPrimaryKey = primaryKeys.includes(columnName);
-                const columnMeta = columnsMetadata.find(col => col.name === columnName);
-                const isNotNull = columnMeta?.notNull;
-                const value = '';
-                
-                return '<td class="editable' + (isPrimaryKey ? ' primary-key' : '') + 
-                    '" data-column="' + columnName + 
-                    '" data-original-value="' + value + 
-                    '" data-is-pk="' + isPrimaryKey + '">' +
-                    (isPrimaryKey || isNotNull ? '' : 'NULL') +
-                '</td>';
-            }).join('') + '<td>' +
-                '<div class="row-actions">' +
-                    '<button onclick="deleteRow(' + newRowIndex + ')" class="delete" title="删除此行">删除</button>' +
-                '</div>' +
-            '</td>';
-            
-            tbody.appendChild(tr);
-            bindEditableEvents();
-            newRows.add(newRowIndex);
-
-            // 自动开始编辑第一个单元格
-            const firstCell = tr.querySelector('.editable');
-            if (firstCell) {
-                firstCell.dispatchEvent(new MouseEvent('dblclick', {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window
-                }));
-            }
-
-            // 更新状态显示
-            document.getElementById('status').textContent = '已添加新行，请输入数据后点击保存更改';
-            setTimeout(() => {
-                document.getElementById('status').textContent = '';
-            }, 3000);
-        }
-
-        function validateData(data) {
-            const errors = [];
-            
-            columnsMetadata.forEach(col => {
-                const value = data[col.name];
-                // 主键或非空字段必须有值（去除空格后）
-                if ((col.isPrimaryKey || col.notNull) && 
-                    (value === undefined || value === null || value.toString().trim() === '' || value === 'NULL')) {
-                    errors.push(col.name + ' 不能为空');
-                }
-            });
-
-            return errors;
-        }
-
-        function finishEditing(input) {
-            const cell = input.parentElement;
-            const newValue = input.value.trim();  // 去除首尾空格
-            const originalValue = cell.dataset.originalValue;
-            const column = cell.dataset.column;
-            const rowIndex = cell.parentElement.dataset.rowIndex;
-            const isPrimaryKey = cell.dataset.isPk === 'true';
-            const columnMeta = columnsMetadata.find(col => col.name === column);
-            
-            // 验证主键和非空字段
-            if ((isPrimaryKey || columnMeta?.notNull) && (!newValue || newValue === 'NULL')) {
-                document.getElementById('status').textContent = column + ' 不能为空';
-                setTimeout(() => {
-                    document.getElementById('status').textContent = '';
-                }, 3000);
-                input.focus();
-                return;
-            }
-            
-            cell.classList.remove('editing');
-            
-            // 如果是主键或非空字段，直接使用值，否则如果为空则显示 NULL
-            cell.textContent = (isPrimaryKey || columnMeta?.notNull) ? newValue : (newValue || 'NULL');
-            
-            if (newValue !== originalValue) {
-                cell.classList.add('modified');
-                
-                if (!modifiedData.has(rowIndex)) {
-                    modifiedData.set(rowIndex, new Map());
-                }
-                
-                // 保存实际值，主键和非空字段不允许为 null
-                if (isPrimaryKey || columnMeta?.notNull) {
-                    modifiedData.get(rowIndex).set(column, newValue);
-                } else {
-                    modifiedData.get(rowIndex).set(column, newValue === 'NULL' || !newValue ? null : newValue);
-                }
-            } else {
-                cell.classList.remove('modified');
-            }
-        }
-
-        function saveChanges() {
-            if (modifiedData.size === 0 && deletedRows.size === 0 && newRows.size === 0) {
-                document.getElementById('status').textContent = '没有需要保存的更改';
-                setTimeout(() => {
-                    document.getElementById('status').textContent = '';
-                }, 3000);
-                return;
-            }
-
-            // 验证所有更改
-            let hasErrors = false;
-            const allErrors = [];
-
-            // 验证更新
-            modifiedData.forEach((columns, rowIndex) => {
-                if (newRows.has(parseInt(rowIndex))) return;
-                const row = document.querySelector('tr[data-row-index="' + rowIndex + '"]');
-                if (!row || deletedRows.has(parseInt(rowIndex))) return;
-
-                const updateData = {};
-                columns.forEach((value, column) => {
-                    const cell = row.querySelector('td[data-column="' + column + '"]');
-                    const isPrimaryKey = cell && cell.dataset.isPk === 'true';
-                    const columnMeta = columnsMetadata.find(col => col.name === column);
-                    
-                    // 对于主键和非空字段，直接使用值
-                    // 对于可空字段，如果值为 'NULL' 或空字符串，则设为 null
-                    if (isPrimaryKey || columnMeta?.notNull) {
-                        updateData[column] = value;
-                    } else {
-                        updateData[column] = (!value || value === 'NULL') ? null : value;
-                    }
-                });
-
-                const errors = validateData(updateData);
-                if (errors.length > 0) {
-                    hasErrors = true;
-                    allErrors.push('第 ' + (parseInt(rowIndex) + 1) + ' 行: ' + errors.join(', '));
-                }
-            });
-
-            // 验证新增
-            newRows.forEach(rowIndex => {
-                const row = document.querySelector('tr[data-row-index="' + rowIndex + '"]');
-                if (!row) return;
-
-                const insertData = {};
-                Array.from(row.cells).forEach(cell => {
-                    if (!cell.classList.contains('editable')) return;
-                    const column = cell.dataset.column;
-                    const value = cell.textContent.trim();
-                    const isPrimaryKey = cell.dataset.isPk === 'true';
-                    const columnMeta = columnsMetadata.find(col => col.name === column);
-                    
-                    // 对于主键和非空字段，直接使用值
-                    // 对于可空字段，如果值为 'NULL' 或空字符串，则设为 null
-                    if (isPrimaryKey || columnMeta?.notNull) {
-                        insertData[column] = value;
-                    } else {
-                        insertData[column] = (!value || value === 'NULL') ? null : value;
-                    }
-                });
-
-                const errors = validateData(insertData);
-                if (errors.length > 0) {
-                    hasErrors = true;
-                    allErrors.push('新增行 ' + (parseInt(rowIndex) + 1) + ': ' + errors.join(', '));
-                }
-            });
-
-            if (hasErrors) {
-                document.getElementById('status').textContent = '验证错误: ' + allErrors.join('; ');
-                setTimeout(() => {
-                    document.getElementById('status').textContent = '';
-                }, 5000);
-                return;
-            }
-
-            const saveButton = document.querySelector('button[onclick="saveChanges()"]');
-            saveButton.disabled = true;
-            saveButton.textContent = '保存中...';
-            document.getElementById('status').textContent = '正在保存...';
-
-            const changes = {
-                updates: [],
-                deletes: [],
-                inserts: []
-            };
-
-            // 处理更新
-            modifiedData.forEach((columns, rowIndex) => {
-                if (newRows.has(parseInt(rowIndex))) return;
-                const row = document.querySelector('tr[data-row-index="' + rowIndex + '"]');
-                if (!row || deletedRows.has(parseInt(rowIndex))) return;
-
-                const updateData = {};
-                columns.forEach((value, column) => {
-                    const cell = row.querySelector('td[data-column="' + column + '"]');
-                    const isPrimaryKey = cell && cell.dataset.isPk === 'true';
-                    const columnMeta = columnsMetadata.find(col => col.name === column);
-                    
-                    // 对于主键和非空字段，直接使用值
-                    // 对于可空字段，如果值为 'NULL' 或空字符串，则设为 null
-                    if (isPrimaryKey || columnMeta?.notNull) {
-                        updateData[column] = value;
-                    } else {
-                        updateData[column] = (!value || value === 'NULL') ? null : value;
-                    }
-                });
-
-                changes.updates.push({
-                    primaryKeyData: getRowIdentifier(row),
-                    updateData
-                });
-            });
-
-            // 处理删除
-            deletedRows.forEach(rowIndex => {
-                const row = document.querySelector('tr[data-row-index="' + rowIndex + '"]');
-                if (!row) return;
-
-                changes.deletes.push({
-                    primaryKeyData: getRowIdentifier(row)
-                });
-            });
-
-            // 处理插入
-            newRows.forEach(rowIndex => {
-                const row = document.querySelector('tr[data-row-index="' + rowIndex + '"]');
-                if (!row) return;
-
-                const insertData = {};
-                Array.from(row.cells).forEach(cell => {
-                    if (!cell.classList.contains('editable')) return;
-                    const column = cell.dataset.column;
-                    const value = cell.textContent.trim();
-                    const isPrimaryKey = cell.dataset.isPk === 'true';
-                    const columnMeta = columnsMetadata.find(col => col.name === column);
-                    
-                    // 对于主键和非空字段，直接使用值
-                    // 对于可空字段，如果值为 'NULL' 或空字符串，则设为 null
-                    if (isPrimaryKey || columnMeta?.notNull) {
-                        insertData[column] = value;
-                    } else {
-                        insertData[column] = (!value || value === 'NULL') ? null : value;
-                    }
-                });
-
-                changes.inserts.push({ insertData });
-            });
-
-            vscode.postMessage({
-                command: 'saveChanges',
-                changes: changes
-            });
-        }
-
-        function handleDblClick(event) {
-            const cell = event.target;
-            if (!cell.classList.contains('editing')) {
-                const value = cell.dataset.originalValue;
-                const input = document.createElement('input');
-                input.value = value === 'NULL' ? '' : value;
-                input.addEventListener('blur', function() {
-                    finishEditing(this);
-                });
-                input.addEventListener('keydown', function(e) {
-                    if (e.key === 'Enter') {
-                        e.preventDefault();
-                        this.blur();
-                    } else if (e.key === 'Escape') {
-                        e.preventDefault();
-                        this.value = this.parentElement.dataset.originalValue;
-                        this.blur();
-                    }
-                });
-                cell.textContent = '';
-                cell.classList.add('editing');
-                cell.appendChild(input);
-                input.focus();
-                input.select();
-            }
-        }
-
-        // 初始化可编辑单元格
-        document.addEventListener('DOMContentLoaded', function() {
-            bindEditableEvents();
-            
-            // 添加搜索功能
-            const searchInput = document.getElementById('searchInput');
-            searchInput.addEventListener('input', function() {
-                const searchText = this.value.toLowerCase();
-                const rows = document.querySelectorAll('tbody tr');
-                
-                rows.forEach(row => {
-                    let found = false;
-                    const cells = row.querySelectorAll('td');
-                    
-                    cells.forEach(cell => {
-                        if (cell.textContent.toLowerCase().includes(searchText)) {
-                            found = true;
+                // 生成 HTML 内容
+                const htmlContent = `
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>表格预览</title>
+                    <style>
+                        body {
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+                            padding: 0;
+                            margin: 0;
+                            background-color: #1e1e1e;
+                            color: #cccccc;
                         }
-                    });
-                    
-                    row.style.display = found ? '' : 'none';
-                });
-            });
-            
-            // 添加快捷键支持
-            document.addEventListener('keydown', function(e) {
-                // 检查是否按下 Ctrl+S 或 Command+S
-                if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-                    e.preventDefault();
-                    saveChanges();
-                }
-                // 检查是否按下 Ctrl+F 或 Command+F
-                if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-                    e.preventDefault();
-                    searchInput.focus();
-                }
-            });
-        });
+                        .container {
+                            padding: 10px;
+                        }
+                        .toolbar {
+                            margin-bottom: 10px;
+                            padding: 5px 0;
+                            display: flex;
+                            align-items: center;
+                        }
+                        button {
+                            background-color: #0e639c;
+                            color: white;
+                            border: none;
+                            padding: 5px 10px;
+                            margin-right: 10px;
+                            cursor: pointer;
+                            border-radius: 2px;
+                        }
+                        button:hover {
+                            background-color: #1177bb;
+                        }
+                        button:active {
+                            background-color: #0e5384;
+                        }
+                        .table-container {
+                            overflow: auto;
+                            max-height: calc(100vh - 100px);
+                            border: 1px solid #3c3c3c;
+                        }
+                        table {
+                            border-collapse: collapse;
+                            width: 100%;
+                        }
+                        th, td {
+                            text-align: left;
+                            padding: 8px;
+                            border: 1px solid #3c3c3c;
+                        }
+                        th {
+                            background-color: #252526;
+                            position: sticky;
+                            top: 0;
+                            z-index: 10;
+                        }
+                        tr:nth-child(even) {
+                            background-color: #252526;
+                        }
+                        tr:hover {
+                            background-color: #2a2d2e;
+                        }
+                        .primary-key {
+                            font-weight: bold;
+                            color: #3794ff;
+                        }
+                        .modified {
+                            background-color: rgba(14, 99, 156, 0.2) !important;
+                        }
+                        .new-row {
+                            background-color: rgba(0, 128, 0, 0.2) !important;
+                        }
+                        .deleted {
+                            background-color: rgba(255, 0, 0, 0.2) !important;
+                            text-decoration: line-through;
+                        }
+                        .editing input {
+                            width: 100%;
+                            box-sizing: border-box;
+                            background-color: #2d2d2d;
+                            color: #cccccc;
+                            border: 1px solid #3794ff;
+                            padding: 2px 5px;
+                        }
+                        #status {
+                            margin-left: 10px;
+                            color: #cccccc;
+                        }
+                        .error {
+                            color: #ff6347;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <div class="toolbar">
+                            <input type="text" id="searchInput" placeholder="搜索数据..." style="padding: 5px 10px; margin-right: 10px; background-color: #3c3c3c; border: 1px solid #4c4c4c; color: #cccccc; border-radius: 2px; width: 200px;">
+                            <button id="addNewRowBtn" onclick="addNewRow()" title="添加新数据">添加数据</button>
+                            <button id="saveChangesBtn" onclick="saveChanges()" title="保存所有修改的数据到数据库">保存更改</button>
+                            <button id="refreshDataBtn" onclick="refreshData()" title="从数据库重新加载数据">刷新数据</button>
+                            <span id="status"></span>
+                        </div>
+                        <div class="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        ${columnsMetadata.map((col: any) => `<th class="${col.isPrimaryKey ? 'primary-key' : ''}" title="${col.name}${col.notNull ? ' (NOT NULL)' : ''}">${col.name}</th>`).join('')}
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${result.map((row: any, rowIndex: number) => `
+                                        <tr data-id="${rowIndex}">
+                                            ${columnsMetadata.map((col: any) => `<td class="${col.isPrimaryKey ? 'primary-key editable' : 'editable'}" data-column="${col.name}" data-original-value="${row[col.name] === null ? '' : row[col.name]}">${row[col.name] === null ? 'NULL' : row[col.name]}</td>`).join('')}
+                                            <td class="delete-row"><button class="delete-row-btn" title="删除此行">删除</button></td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
 
-        function bindEditableEvents() {
-            document.querySelectorAll('.editable').forEach(cell => {
-                cell.removeEventListener('dblclick', handleDblClick);
-                cell.addEventListener('dblclick', handleDblClick);
-            });
-        }
+                    <script>
+                        // 初始化全局变量
+                        let vscode = acquireVsCodeApi();
+                        let modifiedData = {};
+                        let deletedRows = [];
+                        let newRows = [];
+                        let currentRowIndex = null;
+                        let primaryKeys = ${JSON.stringify(primaryKeys)};
+                        let columnsMetadata = ${JSON.stringify(columnsMetadata)};
 
-        function refreshData() {
-            const refreshButton = document.querySelector('button[onclick="refreshData()"]');
-            refreshButton.disabled = true;
-            refreshButton.textContent = '刷新中...';
-            document.getElementById('status').textContent = '正在刷新数据...';
+                        console.log('初始化全局变量完成');
+                        console.log('primaryKeys:', primaryKeys);
+                        console.log('columnsMetadata:', columnsMetadata);
 
-            vscode.postMessage({
-                command: 'refreshData'
-            });
-        }
-
-        // 接收来自扩展的消息
-        window.addEventListener('message', event => {
-            const message = event.data;
-            const saveButton = document.querySelector('button[onclick="saveChanges()"]');
-            const refreshButton = document.querySelector('button[onclick="refreshData()"]');
-
-            switch (message.command) {
-                case 'saveSuccess':
-                    document.querySelectorAll('.modified').forEach(cell => {
-                        cell.classList.remove('modified');
-                        cell.dataset.originalValue = cell.textContent;
-                    });
-                    modifiedData.clear();
-                    deletedRows.clear();
-                    newRows.clear();
-                    document.getElementById('status').textContent = '保存成功';
-                    saveButton.disabled = false;
-                    saveButton.textContent = '保存更改';
-                    setTimeout(() => {
-                        document.getElementById('status').textContent = '';
-                    }, 3000);
-                    break;
-                case 'updateData':
-                    // 更新表格数据
-                    const tbody = document.querySelector('tbody');
-                    tbody.innerHTML = message.data.map((row, rowIndex) => 
-                        '<tr data-row-index="' + rowIndex + '">' +
-                            Object.entries(row).map(([key, value]) => 
-                                '<td class="editable' + (primaryKeys.includes(key) ? ' primary-key' : '') + 
-                                '" data-column="' + key + 
-                                '" data-original-value="' + (value === null ? '' : value) + 
-                                '" data-is-pk="' + (primaryKeys.includes(key) ? 'true' : 'false') + '">' +
-                                    (value === null ? 'NULL' : value) +
-                                '</td>'
-                            ).join('') +
-                            '<td>' +
-                                '<div class="row-actions">' +
-                                    '<button onclick="deleteRow(' + rowIndex + ')" class="delete" title="删除此行">删除</button>' +
-                                '</div>' +
-                            '</td>' +
-                        '</tr>'
-                    ).join('');
-                    // 重新绑定事件监听器
-                    bindEditableEvents();
-                    refreshButton.disabled = false;
-                    refreshButton.textContent = '刷新数据';
-                    document.getElementById('status').textContent = '数据已刷新';
-                    setTimeout(() => {
-                        document.getElementById('status').textContent = '';
-                    }, 3000);
-                    break;
-                case 'error':
-                    document.getElementById('status').textContent = '错误: ' + message.error;
-                    saveButton.disabled = false;
-                    saveButton.textContent = '保存更改';
-                    refreshButton.disabled = false;
-                    refreshButton.textContent = '刷新数据';
-                    setTimeout(() => {
-                        document.getElementById('status').textContent = '';
-                    }, 5000);
-                    break;
+                        // 添加新行
+                        function addNewRow() {
+                            console.log("添加新行按钮被点击");
+                            try {
+                                const table = document.querySelector('table');
+                                if (!table) {
+                                    console.error("未找到表格元素");
+                                    return;
+                                }
+                                
+                                const tbody = table.querySelector('tbody');
+                                if (!tbody) {
+                                    console.error("未找到表格体元素");
+                return;
             }
-        });
-    </script>
-</body>
-</html>`;
+
+                                const newRowId = \`new-\${Date.now()}\`;
+                                const tr = document.createElement('tr');
+                                tr.dataset.id = newRowId;
+                                tr.classList.add('new-row');
+                                
+                                const columns = table.querySelectorAll('thead th');
+                                columns.forEach((column, index) => {
+                                    if (index < columns.length - 1) { // 跳过最后一列（操作列）
+                                        const td = document.createElement('td');
+                                        td.dataset.column = column.textContent;
+                                        td.textContent = '';
+                                        td.addEventListener('click', function() {
+                                            startEditing(this);
+                                        });
+                                        tr.appendChild(td);
+                                    }
+                                });
+                                
+                                // 添加删除按钮
+                                const deleteCell = document.createElement('td');
+                                deleteCell.className = 'delete-row';
+                                const deleteButton = document.createElement('button');
+                                deleteButton.className = 'delete-row-btn';
+                                deleteButton.title = '删除此行';
+                                deleteButton.textContent = '删除';
+                                deleteCell.appendChild(deleteButton);
+                                tr.appendChild(deleteCell);
+                                
+                                tbody.appendChild(tr);
+                                
+                                // 添加到新行数组
+                                newRows.push(newRowId);
+                                
+                                // 自动开始编辑第一个单元格
+                                const firstCell = tr.querySelector('td');
+                                if (firstCell) {
+                                    startEditing(firstCell);
+                                }
+                                
+                                console.log("新行已添加，ID:", newRowId);
+                            } catch (error) {
+                                console.error("添加新行时出错:", error);
+                            }
+                        }
+
+                        // 保存更改
+                        function saveChanges() {
+                            console.log("保存更改按钮被点击");
+                            try {
+                                // 验证所有修改和新行
+                                let hasErrors = false;
+                                
+                                // 验证修改的行
+                                for (const rowId in modifiedData) {
+                                    const data = modifiedData[rowId];
+                                    const errors = validateData(data);
+                                    if (errors.length > 0) {
+                                        hasErrors = true;
+                                        showError(\`行 \${rowId} 验证错误: \${errors.join(', ')}\`);
+                                    }
+                                }
+                                
+                                // 验证新行
+                                const newRowElements = document.querySelectorAll('.new-row');
+                                newRowElements.forEach(row => {
+                                    const rowId = row.dataset.id;
+                                    if (!modifiedData[rowId]) {
+                                        modifiedData[rowId] = {};
+                                    }
+                                    
+                                    const cells = row.querySelectorAll('td');
+                                    cells.forEach(cell => {
+                                        if (!cell.classList.contains('delete-row')) {
+                                            const column = cell.dataset.column;
+                                            modifiedData[rowId][column] = cell.textContent;
+                                        }
+                                    });
+                                    
+                                    const errors = validateData(modifiedData[rowId]);
+                                    if (errors.length > 0) {
+                                        hasErrors = true;
+                                        showError(\`新行验证错误: \${errors.join(', ')}\`);
+                                    }
+                                });
+                                
+                                if (hasErrors) {
+                return;
+            }
+
+                                // 发送数据到扩展
+                                vscode.postMessage({
+                                    command: 'saveChanges',
+                                    modifiedData,
+                                    deletedRows,
+                                    newRows
+                                });
+                                
+                                // 更新状态
+                                document.getElementById('status').textContent = '正在保存...';
+                                
+                                console.log("已发送保存请求，数据:", {
+                                    modifiedData,
+                                    deletedRows,
+                                    newRows
+                                });
+                            } catch (error) {
+                                console.error("保存更改时出错:", error);
+                                showError(\`保存时出错: \${error.message}\`);
+                            }
+                        }
+
+                        // 刷新数据
+                        function refreshData() {
+                            console.log("刷新数据按钮被点击");
+                            try {
+                                vscode.postMessage({
+                                    command: 'refreshData'
+                                });
+                                document.getElementById('status').textContent = '数据已刷新';
+                            } catch (error) {
+                                console.error("刷新数据时出错:", error);
+                                showError(\`刷新时出错: \${error.message}\`);
+                            }
+                        }
+
+                        // 验证数据
+                        function validateData(data) {
+                            const errors = [];
+                            
+                            // 检查主键和非空字段
+                            columnsMetadata.forEach(column => {
+                                const columnName = column.name;
+                                const isPrimary = primaryKeys.includes(columnName);
+                                const isNotNull = column.notNull;
+                                
+                                if ((isPrimary || isNotNull) && (!data[columnName] || data[columnName] === 'NULL' || data[columnName].trim() === '')) {
+                                    errors.push(columnName + ' 不能为空');
+                                }
+                            });
+                            
+                            return errors;
+                        }
+
+                        // 开始编辑单元格
+                        function startEditing(cell) {
+                            console.log("开始编辑单元格:", cell.dataset.column);
+                            try {
+                                // 如果已经在编辑，先完成之前的编辑
+                                const currentEditing = document.querySelector('.editing');
+                                if (currentEditing) {
+                                    const input = currentEditing.querySelector('input');
+                                    if (input) {
+                                        finishEditing(input);
+                                    }
+                                }
+                                
+                                // 保存原始值
+                                cell.dataset.originalValue = cell.textContent;
+                                
+                                // 创建输入框
+                                const input = document.createElement('input');
+                                input.type = 'text';
+                                input.value = cell.textContent;
+                                input.style.width = '100%';
+                                input.style.boxSizing = 'border-box';
+                                input.style.backgroundColor = '#2d2d2d';
+                                input.style.color = '#cccccc';
+                                input.style.border = '1px solid #3794ff';
+                                input.style.padding = '2px 5px';
+                                
+                                // 清空单元格并添加输入框
+                                cell.textContent = '';
+                                cell.classList.add('editing');
+                                cell.appendChild(input);
+                                
+                                // 聚焦输入框
+                                input.focus();
+                                
+                                // 输入框失去焦点时完成编辑
+                                input.addEventListener('blur', function() {
+                                    finishEditing(this);
+                                });
+                                
+                                // 记录当前行索引
+                                const row = cell.parentElement;
+                                currentRowIndex = Array.from(row.parentElement.children).indexOf(row);
+                                
+                                console.log("单元格编辑已开始");
+            } catch (error) {
+                                console.error("开始编辑单元格时出错:", error);
+                            }
+                        }
+
+                        // 完成编辑单元格
+                        function finishEditing(input) {
+                            console.log("完成编辑单元格");
+                            try {
+                                const cell = input.parentElement;
+                                const newValue = input.value;
+                                const column = cell.dataset.column;
+                                const row = cell.parentElement;
+                                const rowId = row.dataset.id;
+                                
+                                // 检查主键和非空字段
+                                const isPrimary = primaryKeys.includes(column);
+                                const isNotNull = columnsMetadata.some(col => col.name === column && col.notNull);
+                                
+                                if ((isPrimary || isNotNull) && (!newValue || newValue === 'NULL' || newValue.trim() === '')) {
+                                    showError(column + ' 不能为空');
+                                    input.focus();
+                return;
+            }
+
+                                // 更新单元格内容
+                                cell.textContent = newValue;
+                                cell.classList.remove('editing');
+                                
+                                // 如果值发生变化，记录修改
+                                if (newValue !== cell.dataset.originalValue) {
+                                    if (!modifiedData[rowId]) {
+                                        modifiedData[rowId] = {};
+                                    }
+                                    modifiedData[rowId][column] = newValue;
+                                    
+                                    // 标记行为已修改
+                                    if (!row.classList.contains('new-row')) {
+                                        row.classList.add('modified');
+                                    }
+                                    
+                                    console.log("单元格已修改:", {
+                                        rowId,
+                                        column,
+                                        value: newValue
+                                    });
+                                }
+                                
+                                // 重置当前行索引
+                                currentRowIndex = null;
+                            } catch (error) {
+                                console.error("完成编辑单元格时出错:", error);
+                            }
+                        }
+
+                        // 显示错误消息
+                        function showError(message) {
+                            console.error("错误:", message);
+                            try {
+                                const statusElement = document.getElementById('status');
+                                if (statusElement) {
+                                    statusElement.textContent = message;
+                                    statusElement.style.color = '#ff6347';
+                                    
+                                    // 3秒后清除错误消息
+                                    setTimeout(() => {
+                                        statusElement.textContent = '';
+                                        statusElement.style.color = '';
+                                    }, 3000);
+                                } else {
+                                    console.error("未找到状态元素");
+                                    alert(message);
+                                }
+                            } catch (error) {
+                                console.error("显示错误消息时出错:", error);
+                                alert(message);
+                            }
+                        }
+
+                        // 设置事件委托
+                        document.addEventListener('click', function(event) {
+                            const target = event.target;
+                            
+                            // 处理删除行按钮点击
+                            if (target.classList.contains('delete-row-btn')) {
+                                const row = target.closest('tr');
+                                if (row) {
+                                    const rowId = row.dataset.id;
+                                    if (rowId) {
+                                        // 如果是新行，直接移除
+                                        if (newRows.includes(rowId)) {
+                                            const index = newRows.indexOf(rowId);
+                                            if (index > -1) {
+                                                newRows.splice(index, 1);
+                                            }
+                                            row.remove();
+                                        } else {
+                                            // 否则标记为删除
+                                            deletedRows.push(rowId);
+                                            row.classList.add('deleted');
+                                            row.style.display = 'none';
+                                        }
+                                        console.log("行已删除，ID:", rowId);
+                                    }
+                                }
+                            }
+                            
+                            // 处理单元格点击
+                            if (target.tagName === 'TD' && !target.classList.contains('delete-row')) {
+                                startEditing(target);
+                            }
+                        });
+                        
+                        // 处理键盘事件
+                        document.addEventListener('keydown', function(event) {
+                            if (event.key === 'Escape') {
+                                const input = document.querySelector('.editing input');
+                                if (input) {
+                                    const cell = input.parentElement;
+                                    cell.textContent = cell.dataset.originalValue || '';
+                                    cell.classList.remove('editing');
+                                    currentRowIndex = null;
+                                }
+                            } else if (event.key === 'Enter') {
+                                const input = document.querySelector('.editing input');
+                                if (input) {
+                                    finishEditing(input);
+                                }
+                            }
+                        });
+                        
+                        // 处理搜索输入
+                        const searchInput = document.getElementById('searchInput');
+                        if (searchInput) {
+                            searchInput.addEventListener('input', function() {
+                                const searchTerm = this.value.toLowerCase();
+                                const rows = document.querySelectorAll('tbody tr');
+                                
+                                rows.forEach(row => {
+                                    const cells = row.querySelectorAll('td');
+                                    let found = false;
+                                    
+                                    cells.forEach(cell => {
+                                        if (cell.textContent.toLowerCase().includes(searchTerm)) {
+                                            found = true;
+                                        }
+                                    });
+                                    
+                                    row.style.display = found ? '' : 'none';
+                                });
+                            });
+                            console.log("搜索输入事件已绑定");
+                        } else {
+                            console.error("未找到搜索输入框");
+                        }
+
+                        // 接收来自扩展的消息
+                        window.addEventListener('message', event => {
+                            const message = event.data;
+                            
+                            switch (message.command) {
+                                case 'saveSuccess':
+                                    // 清除所有修改标记
+                                    document.querySelectorAll('.modified, .new-row').forEach(row => {
+                                        row.classList.remove('modified', 'new-row');
+                                    });
+                                    
+                                    // 重置数据
+                                    modifiedData = {};
+                                    deletedRows = [];
+                                    newRows = [];
+                                    
+                                    document.getElementById('status').textContent = '保存成功';
+                                    setTimeout(() => {
+                                        document.getElementById('status').textContent = '';
+                                    }, 3000);
+                                    break;
+                                    
+                                case 'updateData':
+                                    console.log('收到数据更新消息:', message.data);
+                                    // 更新表格数据
+                                    const tbody = document.querySelector('tbody');
+                                    if (tbody) {
+                                        // 清空表格
+                                        tbody.innerHTML = '';
+                                        
+                                        // 添加新数据
+                                        message.data.forEach((row, rowIndex) => {
+                                            const tr = document.createElement('tr');
+                                            tr.dataset.id = rowIndex.toString();
+                                            
+                                            // 添加数据列
+                                            columnsMetadata.forEach(col => {
+                                                const td = document.createElement('td');
+                                                td.dataset.column = col.name;
+                                                td.dataset.originalValue = row[col.name] === null ? '' : row[col.name];
+                                                td.textContent = row[col.name] === null ? 'NULL' : row[col.name];
+                                                td.classList.add('editable');
+                                                if (col.isPrimaryKey) {
+                                                    td.classList.add('primary-key');
+                                                }
+                                                tr.appendChild(td);
+                                            });
+                                            
+                                            // 添加操作列
+                                            const actionTd = document.createElement('td');
+                                            actionTd.classList.add('delete-row');
+                                            const deleteBtn = document.createElement('button');
+                                            deleteBtn.classList.add('delete-row-btn');
+                                            deleteBtn.title = '删除此行';
+                                            deleteBtn.textContent = '删除';
+                                            actionTd.appendChild(deleteBtn);
+                                            tr.appendChild(actionTd);
+                                            
+                                            tbody.appendChild(tr);
+                                        });
+                                    }
+                                    
+                                    // 重置数据
+                                    modifiedData = {};
+                                    deletedRows = [];
+                                    newRows = [];
+                                    
+                                    document.getElementById('status').textContent = '数据已刷新';
+                                    setTimeout(() => {
+                                        document.getElementById('status').textContent = '';
+                                    }, 3000);
+                                    break;
+                                    
+                                case 'error':
+                                    showError(message.error);
+                                    break;
+                            }
+                        });
+
+                        console.log("脚本初始化完成");
+                    </script>
+                </body>
+                </html>
+                `;
 
                 panel.webview.html = htmlContent;
 
                 // 处理来自 WebView 的消息
                 panel.webview.onDidReceiveMessage(async message => {
+                    console.log('收到来自 WebView 的消息:', message);
+                    
                     try {
                         switch (message.command) {
                             case 'saveChanges':
-                                try {
+                                console.log('处理保存更改请求:', message);
+                                
+                                // 获取原始数据
+                                let originalData: Record<string, any> = {};
+                                
+                                if (config.type === 'mongodb') {
+                                    try {
+                                        console.log('获取MongoDB原始数据...');
+                                        
+                                        // 获取 MongoDB 连接
+                                        const connection = await databaseManager.getMongoConnection(connectionId, databaseName);
+                                        if (!connection) {
+                                            throw new Error('无法获取 MongoDB 连接');
+                                        }
+                                        
+                                        // 执行查询
+                                        console.log('执行MongoDB查询:', { collection: tableName });
+                                        const cursor = connection.collection(tableName).find({});
+                                        const mongoResult = await cursor.toArray();
+                                        console.log('MongoDB查询结果:', mongoResult);
+                                        
+                                        // 将结果转换为索引对象
+                                        mongoResult.forEach((row: any, index: number) => {
+                                            originalData[index] = row;
+                                        });
+                                    } catch (error) {
+                                        console.error('获取MongoDB原始数据失败:', error);
+                                        vscode.window.showErrorMessage(`获取MongoDB原始数据失败: ${(error as Error).message}`);
+                                        throw error;
+                                    }
+                                } else {
+                                    const result = await databaseManager.executeQuery(connectionId, 'SELECT * FROM ' + tableName + ' LIMIT 1000');
+                                    result.forEach((row: any, index: number) => {
+                                        originalData[index] = row;
+                                    });
+                                }
+                                
+                                // 构建 changes 对象
+                                const changes = {
+                                    deletes: [] as Array<{primaryKeyData: Record<string, any>, rowData: Record<string, any>}>,
+                                    updates: [] as Array<{primaryKeyData: Record<string, any>, updateData: Record<string, any>}>,
+                                    inserts: [] as Array<{insertData: Record<string, any>}>
+                                };
+                                
+                                // 处理删除的行
+                                if (message.deletedRows && message.deletedRows.length > 0) {
+                                    for (const rowId of message.deletedRows) {
+                                        if (originalData[rowId]) {
+                                            // 获取主键数据
+                                            const primaryKeyData: Record<string, any> = {};
+                                            for (const pk of primaryKeys) {
+                                                primaryKeyData[pk] = originalData[rowId][pk];
+                                            }
+                                            // 保存整行数据用于无主键情况
+                                            changes.deletes.push({ 
+                                                primaryKeyData,
+                                                rowData: {...originalData[rowId]} 
+                                            });
+                                        }
+                                    }
+                                }
+                                
+                                // 处理修改的行
+                                if (message.modifiedData) {
+                                    for (const rowId in message.modifiedData) {
+                                        // 跳过新行，新行会在 inserts 中处理
+                                        if (message.newRows && message.newRows.includes(rowId)) {
+                                            continue;
+                                        }
+                                        
+                                        const updateData = message.modifiedData[rowId];
+                                        // 获取主键数据
+                                        const primaryKeyData: Record<string, any> = {};
+                                        for (const pk of primaryKeys) {
+                                            if (originalData[rowId]) {
+                                                primaryKeyData[pk] = originalData[rowId][pk];
+                                            }
+                                        }
+                                        changes.updates.push({ primaryKeyData, updateData });
+                                    }
+                                }
+                                
+                                // 处理新行
+                                if (message.newRows && message.newRows.length > 0) {
+                                    for (const rowId of message.newRows) {
+                                        if (message.modifiedData && message.modifiedData[rowId]) {
+                                            changes.inserts.push({ insertData: message.modifiedData[rowId] });
+                                        }
+                                    }
+                                }
+                                
+                                console.log('构建的 changes 对象:', changes);
+                                
+                                // MongoDB 需要特殊处理
+                                if (config.type === 'mongodb') {
+                                    try {
+                                        console.log('处理MongoDB数据保存...');
+                                        
+                                        // 获取 MongoDB 连接
+                                        const connection = await databaseManager.getMongoConnection(connectionId, databaseName);
+                                        if (!connection) {
+                                            throw new Error('无法获取 MongoDB 连接');
+                                        }
+                                        
+                                        // 处理删除
+                                        for (const deleteOp of changes.deletes) {
+                                            // 构建删除条件
+                                            const filter: Record<string, any> = {};
+                                            // 如果有 _id 字段，优先使用
+                                            if (deleteOp.rowData._id) {
+                                                filter._id = deleteOp.rowData._id;
+                                            } else {
+                                                // 否则使用所有非空字段作为条件
+                                                Object.entries(deleteOp.rowData).forEach(([key, value]) => {
+                                                    if (value !== null && value !== undefined && value !== '') {
+                                                        filter[key] = value;
+                                                    }
+                                                });
+                                            }
+                                            
+                                            // 执行删除操作
+                                            console.log('执行MongoDB删除操作:', { collection: tableName, filter });
+                                            const deleteResult = await connection.collection(tableName).deleteOne(filter);
+                                            console.log('MongoDB删除结果:', deleteResult);
+                                        }
+                                        
+                                        // 处理更新
+                                        for (const updateOp of changes.updates) {
+                                            // 构建更新条件
+                                            const filter: Record<string, any> = {};
+                                            // 如果有 _id 字段，优先使用
+                                            if (updateOp.primaryKeyData._id) {
+                                                filter._id = updateOp.primaryKeyData._id;
+                                            } else {
+                                                // 否则使用所有主键字段作为条件
+                                                Object.entries(updateOp.primaryKeyData).forEach(([key, value]) => {
+                                                    if (value !== null && value !== undefined && value !== '') {
+                                                        filter[key] = value;
+                                                    }
+                                                });
+                                            }
+                                            
+                                            // 构建更新数据
+                                            const update = { $set: updateOp.updateData };
+                                            
+                                            // 执行更新操作
+                                            console.log('执行MongoDB更新操作:', { collection: tableName, filter, update });
+                                            const updateResult = await connection.collection(tableName).updateOne(filter, update);
+                                            console.log('MongoDB更新结果:', updateResult);
+                                        }
+                                        
+                                        // 处理插入
+                                        for (const insertOp of changes.inserts) {
+                                            // 执行插入操作
+                                            console.log('执行MongoDB插入操作:', { collection: tableName, data: insertOp.insertData });
+                                            const insertResult = await connection.collection(tableName).insertOne(insertOp.insertData);
+                                            console.log('MongoDB插入结果:', insertResult);
+                                        }
+                                    } catch (error) {
+                                        console.error('MongoDB数据保存失败:', error);
+                                        vscode.window.showErrorMessage(`MongoDB数据保存失败: ${(error as Error).message}`);
+                                        throw error;
+                                    }
+                                } else {
                                     // 处理删除
-                                    for (const deleteOp of message.changes.deletes) {
-                                        const whereConditions = Object.entries(deleteOp.primaryKeyData)
+                                    for (const deleteOp of changes.deletes) {
+                                        // 使用所有列构建更精确的WHERE条件
+                                        const rowId = message.deletedRows.find((id: string) => 
+                                            Object.entries(deleteOp.primaryKeyData).some(([key, value]) => 
+                                                originalData[id] && originalData[id][key] === value
+                                            )
+                                        );
+                                        
+                                        if (!rowId || !originalData[rowId]) {
+                                            console.warn('跳过删除操作：找不到原始行数据');
+                                            continue;
+                                        }
+                                        
+                                        // 使用所有列构建WHERE条件
+                                        const whereConditions = Object.entries(originalData[rowId])
                                             .map(([column, value]) => {
                                                 if (value === null || value === 'NULL' || value === '') {
                                                     return column + ' IS NULL';
                                                 }
-                                                return column + ' = ' + (typeof value === 'string' ? "'" + value + "'" : value);
+                                                return column + ' = ' + (typeof value === 'string' ? "'" + value.replace(/'/g, "''") + "'" : value);
                                             })
                                             .filter(condition => condition) // 过滤掉空条件
                                             .join(' AND ');
@@ -912,7 +1214,7 @@ export function activate(context: vscode.ExtensionContext) {
                                     }
 
                                     // 处理更新
-                                    for (const updateOp of message.changes.updates) {
+                                    for (const updateOp of changes.updates) {
                                         const whereConditions = Object.entries(updateOp.primaryKeyData)
                                             .map(([column, value]) => {
                                                 // 主键不允许为 NULL
@@ -946,71 +1248,134 @@ export function activate(context: vscode.ExtensionContext) {
                                     }
 
                                     // 处理插入
-                                    for (const insertOp of message.changes.inserts) {
-                                        const columns = Object.keys(insertOp.insertData).filter(col => col !== 'id');
-                                        const values = Object.entries(insertOp.insertData)
-                                            .filter(([col]) => col !== 'id')
-                                            .map(([column, value]) => {
-                                                // 主键不允许为 NULL
-                                                if (primaryKeys.includes(column)) {
-                                                    return typeof value === 'string' ? "'" + value + "'" : value;
-                                                } else if (value === null) {
-                                                    return 'NULL';
-                                                } else {
-                                                    return typeof value === 'string' ? "'" + value + "'" : value;
+                                    for (const insertOp of changes.inserts) {
+                                        // 过滤掉空值和NULL值的主键
+                                        const insertData = { ...insertOp.insertData };
+                                        
+                                        // 检查主键是否为空或NULL
+                                        const hasPrimaryKeyValue = primaryKeys.some(pk => 
+                                            insertData[pk] !== undefined && 
+                                            insertData[pk] !== null && 
+                                            insertData[pk] !== 'NULL' && 
+                                            insertData[pk].toString().trim() !== ''
+                                        );
+                                        
+                                        // 如果是自增主键且没有提供值，则不包含主键列
+                                        const columns = Object.keys(insertData)
+                                            .filter(col => {
+                                                // 如果是主键且值为空，则不包含该列（让数据库自动生成）
+                                                if (primaryKeys.includes(col)) {
+                                                    const value = insertData[col];
+                                                    return value !== undefined && 
+                                                           value !== null && 
+                                                           value !== 'NULL' && 
+                                                           value.toString().trim() !== '';
                                                 }
+                                                return true; // 非主键列都包含
                                             });
+                                        
+                                        const values = columns.map(column => {
+                                            const value = insertData[column];
+                                            if (value === null || value === 'NULL' || value === '') {
+                                                return 'NULL';
+                                            } else {
+                                                return typeof value === 'string' ? "'" + value.replace(/'/g, "''") + "'" : value;
+                                            }
+                                        });
 
-                                    const insertQuery = columns.length > 0 ?
-                                        'INSERT INTO ' + tableName + ' (' + columns.join(', ') + ') VALUES (' + values.join(', ') + ')' :
-                                        'INSERT INTO ' + tableName + ' DEFAULT VALUES';
-
-                                    console.log('执行插入查询:', insertQuery);
-                                    await databaseManager.executeQuery(connectionId, insertQuery);
+                                        const insertQuery = columns.length > 0 ?
+                                            'INSERT INTO ' + tableName + ' (' + columns.join(', ') + ') VALUES (' + values.join(', ') + ')' :
+                                            'INSERT INTO ' + tableName + ' DEFAULT VALUES';
+                                            
+                                        console.log('执行插入查询:', insertQuery);
+                                        await databaseManager.executeQuery(connectionId, insertQuery);
+                                    }
                                 }
-
+                                
+                                // 发送保存成功消息
                                 panel.webview.postMessage({ command: 'saveSuccess' });
                                 vscode.window.showInformationMessage('数据更新成功');
 
                                 // 刷新数据
-                                const result = await databaseManager.executeQuery(connectionId, 'SELECT * FROM ' + tableName + ' LIMIT 1000');
-                                panel.webview.postMessage({
-                                    command: 'updateData',
-                                    data: result
-                                });
-                            } catch (error: any) {
-                                panel.webview.postMessage({
-                                    command: 'error',
-                                    error: error.message
-                                });
-                                vscode.window.showErrorMessage('更新失败: ' + error.message);
-                            }
-                            break;
-
-                        case 'refreshData':
-                            try {
-                                const result = await databaseManager.executeQuery(connectionId, 'SELECT * FROM ' + tableName + ' LIMIT 1000');
-                                panel.webview.postMessage({
-                                    command: 'updateData',
-                                    data: result
-                                });
-                            } catch (error: any) {
-                                panel.webview.postMessage({
-                                    command: 'error',
-                                    error: error.message
-                                });
-                                vscode.window.showErrorMessage('刷新数据失败: ' + error.message);
-                            }
-                            break;
+                                let refreshResult;
+                                try {
+                                    if (config.type === 'mongodb') {
+                                        console.log('刷新MongoDB数据...');
+                                        
+                                        // 获取 MongoDB 连接
+                                        const connection = await databaseManager.getMongoConnection(connectionId, databaseName);
+                                        if (!connection) {
+                                            throw new Error('无法获取 MongoDB 连接');
+                                        }
+                                        
+                                        // 执行查询
+                                        console.log('执行MongoDB查询:', { collection: tableName });
+                                        const cursor = connection.collection(tableName).find({});
+                                        refreshResult = await cursor.toArray();
+                                        console.log('MongoDB查询结果:', refreshResult);
+                                    } else {
+                                        refreshResult = await databaseManager.executeQuery(connectionId, 'SELECT * FROM ' + tableName + ' LIMIT 1000');
+                                    }
+                                    
+                                    panel.webview.postMessage({ 
+                                        command: 'updateData',
+                                        data: refreshResult
+                                    });
+                                } catch (error) {
+                                    console.error('刷新数据失败:', error);
+                                    vscode.window.showErrorMessage(`刷新数据失败: ${(error as Error).message}`);
+                                }
+                                break;
+                                
+                            case 'refreshData':
+                                console.log('处理刷新数据请求');
+                                
+                                let refreshDataResult;
+                                try {
+                                    if (config.type === 'mongodb') {
+                                        console.log('刷新MongoDB数据...');
+                                        
+                                        // 获取 MongoDB 连接
+                                        const connection = await databaseManager.getMongoConnection(connectionId, databaseName);
+                                        if (!connection) {
+                                            throw new Error('无法获取 MongoDB 连接');
+                                        }
+                                        
+                                        // 执行查询
+                                        console.log('执行MongoDB查询:', { collection: tableName });
+                                        const cursor = connection.collection(tableName).find({});
+                                        refreshDataResult = await cursor.toArray();
+                                        console.log('MongoDB查询结果:', refreshDataResult);
+                                    } else {
+                                        refreshDataResult = await databaseManager.executeQuery(connectionId, 'SELECT * FROM ' + tableName + ' LIMIT 1000');
+                                    }
+                                    
+                                    panel.webview.postMessage({ 
+                                        command: 'updateData',
+                                        data: refreshDataResult
+                                    });
+                                } catch (error) {
+                                    console.error('刷新数据失败:', error);
+                                    vscode.window.showErrorMessage(`刷新数据失败: ${(error as Error).message}`);
+                                }
+                                break;
+                                
+                            default:
+                                console.warn('未知命令:', message.command);
+                                break;
                         }
                     } catch (error: any) {
-                        vscode.window.showErrorMessage('处理消息失败: ' + error.message);
+                        console.error('处理 WebView 消息时出错:', error);
+                        panel.webview.postMessage({ 
+                            command: 'error',
+                            error: error.message
+                        });
+                        vscode.window.showErrorMessage(`操作失败: ${error.message}`);
                     }
                 });
             } catch (error) {
-                vscode.window.showErrorMessage(`加载表数据失败: ${(error as Error).message}`);
+                console.error('预览表数据时出错:', error);
+                vscode.window.showErrorMessage(`预览表数据失败: ${(error as Error).message}`);
             }
         }));
 }
-
-export function deactivate() { }

@@ -31,21 +31,6 @@ if (!fs.existsSync(outDir)) {
 	fs.mkdirSync(outDir, { recursive: true });
 }
 
-// 复制模板文件
-const templatesDir = path.join(__dirname, 'src', 'templates');
-const outTemplatesDir = path.join(outDir, 'templates');
-if (!fs.existsSync(outTemplatesDir)) {
-	fs.mkdirSync(outTemplatesDir, { recursive: true });
-}
-if (fs.existsSync(templatesDir)) {
-	fs.readdirSync(templatesDir).forEach(file => {
-		fs.copyFileSync(
-			path.join(templatesDir, file),
-			path.join(outTemplatesDir, file)
-		);
-	});
-}
-
 // 删除 dist 目录（如果存在）
 const distDir = path.join(__dirname, 'dist');
 if (fs.existsSync(distDir)) {
@@ -68,9 +53,15 @@ async function main() {
 		external: [
 			'vscode',
 			'mysql2',
-			'pg',
 			'sqlite3',
-			'mssql'
+			'mongodb',
+			'oracledb',
+			'oci-common',
+			'oci-objectstorage',
+			'oci-secrets',
+			'@azure/keyvault-secrets',
+			'@azure/app-configuration',
+			'@azure/identity'
 		],
 		logLevel: 'info',
 		mainFields: ['module', 'main'],

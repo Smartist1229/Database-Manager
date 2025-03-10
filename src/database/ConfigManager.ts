@@ -51,17 +51,18 @@ export class ConfigManager {
         }
     }
 
-    private saveConfigs() {
+    private async saveConfigs(): Promise<void> {
         try {
             const configs = Array.from(this.configs.values());
             const configData = {
                 configs: configs,
                 lastUpdated: new Date().toISOString()
             };
-            fs.writeFileSync(this.configPath, JSON.stringify(configData, null, 2));
+            await fs.promises.writeFile(this.configPath, JSON.stringify(configData, null, 2));
+            console.log('配置文件已成功保存至:', this.configPath);
         } catch (error: any) {
-            console.error('保存配置文件失败:', error);
-            vscode.window.showErrorMessage(`保存数据库配置失败: ${error.message}`);
+            console.error('[配置保存错误] 路径:', this.configPath, '错误详情:', error);
+            vscode.window.showErrorMessage(`配置保存失败: ${error.message}`);
             throw error;
         }
     }
@@ -73,10 +74,16 @@ export class ConfigManager {
         return id;
     }
 
-    public removeConfig(id: string) {
+    public async removeConfig(id: string): Promise<boolean> {
         if (this.configs.delete(id)) {
-            this.saveConfigs();
-            return true;
+            try {
+                await this.saveConfigs();
+                console.log(`配置 ${id} 已成功删除并保存`);
+                return true;
+            } catch (error) {
+                console.error('删除配置保存失败:', error);
+                throw new Error('删除配置保存失败');
+            }
         }
         return false;
     }
@@ -108,4 +115,4 @@ export class ConfigManager {
         const timestamp = Date.now();
         return `${config.type}-${config.host || config.filename || ''}-${config.database || ''}-${timestamp}`;
     }
-} 
+}

@@ -3,13 +3,36 @@
   "displayName": "Database Manager",
   "description": "A database management extension for VS Code",
   "version": "0.0.1",
+  "publisher": "Smartist",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Smartist1229/Database-Manager"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Smartist"
+  },
   "engines": {
     "vscode": "^1.86.0"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "keywords": [
+    "database",
+    "mysql",
+    "sqlite",
+    "mongodb",
+    "oracle",
+    "sql"
+  ],
+  "activationEvents": [
+    "onView:databaseExplorer",
+    "onCommand:database-manager.connectDatabase",
+    "onCommand:database-manager.refreshConnection",
+    "onCommand:database-manager.executeQuery",
+    "onCommand:database-manager.previewTable"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -173,12 +196,13 @@
     "compile": "npm run check-types && npm run lint && node esbuild.js",
     "watch": "node esbuild.js --watch",
     "check-types": "tsc --noEmit",
-    "lint": "eslint src --ext ts",
+    "lint": "eslint src",
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.6",
     "@types/node": "18.x",
+    "@types/oracledb": "^6.5.3",
     "@types/vscode": "^1.86.0",
     "@typescript-eslint/eslint-plugin": "^6.19.1",
     "@typescript-eslint/parser": "^6.19.1",
@@ -189,13 +213,14 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
+    "mongodb": "^6.14.2",
     "mysql2": "^3.9.2",
+    "oracledb": "^6.8.0",
     "pg": "^8.11.3",
     "sqlite3": "^5.1.7",
     "xlsx": "^0.18.5"
   },
   "files": [
-    "out/**/*",
-    "src/templates/**/*"
+    "out/**/*"
   ]
 }
